@@ -244,8 +244,12 @@ output_json["e2e_s"] = []
 output_json["ttft_ms"] = []
 # output_json["itl"] = []
 output_json["tpot_ms"] = []
+output_json["prompts_raw"] = []
+output_json["prompts_raw_len"] = []
 output_json["prompts"] = []
+output_json["prompts_len"] = []
 output_json["responses"] = []
+output_json["responses_len"] = []
 
 
 is_aiu_backend = "aiu" in args.device_type
@@ -519,6 +523,12 @@ else:
     prompts = prompts * ((args.batch_size // 4) + 1)
     prompts = prompts[: args.batch_size]
 
+for prompt in prompts:
+    output_json["prompts_raw"].append(tokenizer.convert_tokens_to_string(
+        tokenizer.convert_ids_to_tokens(prompt)
+    ))
+    output_json["prompts_raw_len"].append(len(prompt))
+                                              
 if args.fixed_prompt_length != 0:
     padding_length = args.fixed_prompt_length
     max_allowed_length = args.fixed_prompt_length
@@ -535,6 +545,12 @@ if args.fixed_prompt_length != 0 and args.fixed_prompt_length < max_len:
     )
     exit(1)
 prompts = truncate_prompts_to_max_length(prompts, max_len, max_allowed_length)
+for prompt in prompts:
+    output_json["prompts"].append(tokenizer.convert_tokens_to_string(
+        tokenizer.convert_ids_to_tokens(prompt)
+    ))
+    output_json["prompts_len"].append(len(prompt))
+
 if has_padding:
     ids, extra_generation_kwargs = pad_input_ids(prompts, min_pad_length=padding_length)
 else:
@@ -598,7 +614,7 @@ def infer(use_cache, do_sample, warmup):
         eos_token_id = tokenizer.eos_token_id
     else:
         eos_token_id = None
-
+    
     result = generate(
         model,
         ids,
@@ -624,6 +640,7 @@ def infer(use_cache, do_sample, warmup):
             dprint(f"TPOT: {(sum(timings[1:])*1000)/len(timings[1:]):.3f} ms")
             output_json["ttft_ms"].append(timings[0]*1000)
             output_json["tpot_ms"].append((sum(timings[1:])*1000)/len(timings[1:]))
+        output_json["responses_len"].append(len(timings))
             
     if len(result.shape) == 1:
         result = result.unsqueeze(0)
