@@ -6,6 +6,8 @@ import random
 import sys
 import time
 from pathlib import Path
+from datetime import datetime
+from typing import Any, Dict
 
 from aiu_fms_testing_utils.utils import aiu_setup
 from aiu_fms_testing_utils.utils.aiu_setup import dprint, rank, local_rank, world_size
@@ -239,6 +241,14 @@ if default_dtype is not None:
 
 dprint(f"{args}")
 
+result_json: Dict[str, Any] = {}
+
+result_json["device_type"] = args.device_type
+result_json["precision"] = args.default_dtype
+result_json["batch_size"] = args.batch_size
+result_json["max_prompt_length"] = args.max_prompt_length
+result_json["max_new_tokens"] = args.max_new_tokens
+
 output_json = vars(args)
 output_json["e2e_s"] = []
 output_json["ttft_ms"] = []
@@ -387,6 +397,8 @@ dprint(f"{fused_weights=}")
 dprint(f"data_type={default_dtype}")
 dprint("="*60 + "\n")
 
+benchmark_start_time = time.perf_counter()
+
 model = get_model(
     args.architecture,
     args.variant,
@@ -416,7 +428,7 @@ torch.set_grad_enabled(False)
 loading_model_time = time.time() - loading_model_time
 dprint(f"loading complete, took {loading_model_time:.3f}s")
 
-output_json["model_load_s"] = loading_model_time
+result_json["model_load_s"] = loading_model_time
 
 if args.compile:
     dprint("compiling model")
@@ -483,7 +495,7 @@ if args.prompt_path != "":
 
     prompts = []
     for i, prompt_file_path in enumerate(prompt_file_paths):
-        if i == args.batch_size:
+        if i == args.batch_size * args.iters:
             break
         prompts.append(ids_for_prompt(prompt_file_path.read_text(encoding="utf-8")))
 
@@ -523,6 +535,7 @@ else:
     prompts = prompts * ((args.batch_size // 4) + 1)
     prompts = prompts[: args.batch_size]
 
+print(type(prompts))
 for prompt in prompts:
     output_json["prompts_raw"].append(tokenizer.convert_tokens_to_string(
         tokenizer.convert_ids_to_tokens(prompt)
@@ -545,18 +558,19 @@ if args.fixed_prompt_length != 0 and args.fixed_prompt_length < max_len:
     )
     exit(1)
 prompts = truncate_prompts_to_max_length(prompts, max_len, max_allowed_length)
+print(type(prompts))
+
 for prompt in prompts:
     output_json["prompts"].append(tokenizer.convert_tokens_to_string(
         tokenizer.convert_ids_to_tokens(prompt)
     ))
     output_json["prompts_len"].append(len(prompt))
 
-if has_padding:
-    ids, extra_generation_kwargs = pad_input_ids(prompts, min_pad_length=padding_length)
-else:
-    ids = prompts
-    extra_generation_kwargs = None
-
+# if has_padding:
+#     ids, extra_generation_kwargs = pad_input_ids([prompts[0]], min_pad_length=padding_length)
+# else:
+#     ids = prompts
+#     extra_generation_kwargs = None
 
 def print_result(result, result_idx: int):
     if local_rank != 0:
@@ -587,7 +601,7 @@ def print_result(result, result_idx: int):
     output_json["responses"].append(output_str)
 
 
-def infer(use_cache, do_sample, warmup):
+def infer(use_cache, do_sample, warmup, iteration=0):
     # With greedy generation (do_sample=False) we _should_ always get the same results.
     # There is currently a bug in start_pos for batched rotary embeddings that can lead
     # varying results for the same prompt.
@@ -600,8 +614,19 @@ def infer(use_cache, do_sample, warmup):
         # without ntk scaling, extending the seq length too far gives bogus results.
         max_seq_len = model.config.max_expected_seq_len
 
+    print(len(prompts))
+    first = (iteration * args.batch_size)
+    print(iteration, first, args.batch_size)
+    if has_padding:
+        ids, extra_generation_kwargs = pad_input_ids(prompts[first:first+args.batch_size], min_pad_length=padding_length)
+    else:
+        ids = prompts
+        extra_generation_kwargs = None
+    print(len(ids))
+    
     # Add only_last_token optimization
-    global extra_generation_kwargs
+    # global extra_generation_kwargs
+            
     if extra_generation_kwargs is None:
         extra_generation_kwargs = {}
     extra_generation_kwargs["only_last_token"] = True
@@ -614,7 +639,7 @@ def infer(use_cache, do_sample, warmup):
         eos_token_id = tokenizer.eos_token_id
     else:
         eos_token_id = None
-    
+        
     result = generate(
         model,
         ids,
@@ -626,6 +651,8 @@ def infer(use_cache, do_sample, warmup):
         eos_token_id=eos_token_id,
         extra_kwargs=extra_generation_kwargs,
     )
+    print(result)
+    
     if args.timing != "":
         result, timings = result
         if args.timing == "e2e":
@@ -662,7 +689,7 @@ if args.compile:
         infer(cache, sample, True)
     pt_compile_model_time = time.time() - pt_compile_model_time
     dprint(f"PT compile complete, took {pt_compile_model_time:.3f}s")
-    output_json["pt_compile_s"] = pt_compile_model_time
+    result_json["pt_compile_s"] = pt_compile_model_time
 
     if is_aiu_backend:
         dprint("executing update_lazyhandle and compiling for AIU")
@@ -670,7 +697,7 @@ if args.compile:
         torch_sendnn.update_lazyhandle()
         update_lh_time = time.time() - update_lh_time
         dprint(f"update_lazyhandle complete, took {update_lh_time:.3f}s")
-        output_json["update_lazyhandle_s"] = update_lh_time
+        result_json["update_lazyhandle_s"] = update_lh_time
 
     if args.device_type == "aiu":  # only run warmup for AIU, no need for senulator
         aiu_warmup_time = time.time()
@@ -678,16 +705,100 @@ if args.compile:
             infer(cache, sample, True)
         aiu_warmup_time = time.time() - aiu_warmup_time
         dprint(f"AIU warmup complete, took {aiu_warmup_time:.3f}s")
-        output_json["aiu_warmup_s"] = aiu_warmup_time
+        result_json["aiu_warmup_s"] = aiu_warmup_time
 
 dprint(f"generating output")
 
 for sample, cache in itertools.product(do_sample, use_cache):
     for _ in range(args.iters):
-        infer(cache, sample, False)
+        print("==============" + str(_))
+        infer(cache, sample, False, _)
 
-dprint(json.dumps(output_json, indent=2))
+benchmark_duration = time.perf_counter() - benchmark_start_time
+ 
+# dprint(json.dumps(output_json, indent=2))
+# completed=completed,
+# total_input=total_input,
+# total_output=sum(actual_output_lens),
+# request_throughput=completed / dur_s,
+# request_goodput=good_completed / dur_s,
+# output_throughput=sum(actual_output_lens) / dur_s,
+# total_token_throughput=(total_input + sum(actual_output_lens)) / dur_s,
+# mean_tpot_ms=np.mean(tpots or 0) * 1000,
+# std_tpot_ms=np.std(tpots or 0) * 1000,
+# median_tpot_ms=np.median(tpots or 0) * 1000,
+# percentiles_tpot_ms=[(p, np.percentile(tpots or 0, p) * 1000)
+#                         for p in selected_percentiles],
+# mean_itl_ms=np.mean(itls or 0) * 1000,
+# std_itl_ms=np.std(itls or 0) * 1000,
+# median_itl_ms=np.median(itls or 0) * 1000,
+# percentiles_itl_ms=[(p, np.percentile(itls or 0, p) * 1000)
+#                     for p in selected_percentiles],
+# mean_e2el_ms=np.mean(e2els or 0) * 1000,
+# std_e2el_ms=np.std(e2els or 0) * 1000,
+# median_e2el_ms=np.median(e2els or 0) * 1000,
+# percentiles_e2el_ms=[(p, np.percentile(e2els or 0, p) * 1000)
+#                         for p in selected_percentiles],
+
+selected_percentiles = [25,50,75,99]
+        
+result = {
+        "duration": benchmark_duration,
+        "completed": len(output_json["responses_len"]),
+        # "total_input_tokens": metrics.total_input,
+        # "total_output_tokens": metrics.total_output,
+        # "request_throughput": metrics.request_throughput,
+        # "request_goodput:":
+        # metrics.request_goodput if goodput_config_dict else None,
+        # "output_throughput": metrics.output_throughput,
+        # "total_token_throughput": metrics.total_token_throughput,
+        "input_lens": output_json["prompts_len"],
+        "output_lens": output_json["responses_len"],
+        "ttfts": output_json["ttft_ms"],
+        "itls": output_json["tpot_ms"],
+        "generated_texts": output_json["responses"],
+        # "errors": [output.error for output in outputs],
+        "mean_ttft_ms": np.mean(output_json["ttft_ms"] or 0),  # ttfts is empty if streaming is not supported by backend
+        "std_ttft_ms": np.std(output_json["ttft_ms"] or 0),
+        "median_ttft_ms": np.median(output_json["ttft_ms"] or 0) ,
+    }
+
+for p in selected_percentiles:
+    result[f"p{p}_ttft_ms"] = np.percentile(output_json["ttft_ms"] or 0, p)
+    
+result["mean_tpot_ms"] = np.mean(output_json["tpot_ms"] or 0)  # ttfts is empty if streaming is not supported by backend
+result["std_tpot_ms"] = np.std(output_json["tpot_ms"] or 0)
+result["median_tpot_ms"] = np.median(output_json["tpot_ms"] or 0)
+for p in selected_percentiles:
+    result[f"p{p}_tpot_ms"] = np.percentile(output_json["tpot_ms"] or 0, p)
+    
+result["mean_itl_ms"] = np.mean(output_json["tpot_ms"] or 0)  # ttfts is empty if streaming is not supported by backend
+result["std_itl_ms"] = np.std(output_json["tpot_ms"] or 0)
+result["median_itl_ms"] = np.median(output_json["tpot_ms"] or 0)
+for p in selected_percentiles:
+    result[f"p{p}_itl_ms"] = np.percentile(output_json["tpot_ms"] or 0, p)
+
+result["mean_e2el_ms"] = np.mean(output_json["e2e_s"] or 0)*1000 # ttfts is empty if streaming is not supported by backend
+result["std_e2el_ms"] = np.std(output_json["e2e_s"] or 0)*1000
+result["median_e2el_ms"] = np.median(output_json["e2e_s"] or 0)*1000
+for p in selected_percentiles:
+    result[f"p{p}_e2el_ms"] = np.percentile(output_json["e2e_s"] or 0, p)*1000
+
+# # Setup
+current_dt = datetime.now().strftime("%Y%m%d-%H%M%S")
+result_json["date"] = current_dt
+result_json["backend"] = "fms"
+result_json["model_id"] = output_json["model_path"].split("/")[-1] if output_json["model_path"] else output_json["variant"].split("/")[-1] 
+result_json["tokenizer_id"] = output_json["tokenizer"]
+result_json["best_of"] = None
+result_json["num_prompts"] = len(output_json["prompts"])
+result_json["request_rate"] = result["completed"] / result["duration"]
+result_json["burstiness"] = None
+result_json["max_concurrency"] = None
+
+# # Merge with benchmark result
+result_json = {**result_json, **result}
 
 if args.json_output_file != "":
     with open(args.json_output_file, "w", encoding="utf-8") as file:
-        json.dump(output_json, file, indent=2)
+        json.dump(result_json, file, indent=2)
