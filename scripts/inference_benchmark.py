@@ -248,6 +248,7 @@ result_json["precision"] = args.default_dtype
 result_json["batch_size"] = args.batch_size
 result_json["max_prompt_length"] = args.max_prompt_length
 result_json["max_new_tokens"] = args.max_new_tokens
+result_json["num_aius"] = os.getenv("NUM_AIUS", None)
 
 output_json = vars(args)
 output_json["e2e_s"] = []
@@ -662,12 +663,20 @@ def infer(use_cache, do_sample, warmup, iteration=0):
             total = sum(timings)
             dprint(f"Per-token timing information: {', '.join([f'{t*1000:.3f}' for t in timings])} ms")
             dprint(f"Total timing information: {total:.3f} s to generate {len(timings)} tokens")
-            output_json["e2e_s"].append(total)
             dprint(f"TTFT: {timings[0]*1000:.3f} ms or {timings[0]:.3f} s")
             dprint(f"TPOT: {(sum(timings[1:])*1000)/len(timings[1:]):.3f} ms")
-            output_json["ttft_ms"].append(timings[0]*1000)
-            output_json["tpot_ms"].append((sum(timings[1:])*1000)/len(timings[1:]))
-        output_json["responses_len"].append(len(timings))
+            if not warmup:
+                output_json["e2e_s"].append(total)
+                output_json["ttft_ms"].append(timings[0]*1000)
+                output_json["tpot_ms"].append((sum(timings[1:])*1000)/len(timings[1:]))
+            else:
+                output_json["warmup_e2e_s"].append(total)
+                output_json["warmup_ttft_ms"].append(timings[0]*1000)
+                output_json["warmup_tpot_ms"].append((sum(timings[1:])*1000)/len(timings[1:]))
+        if not warmup:
+            output_json["responses_len"].append(len(timings))
+        else:
+            output_json["warmup_responses_len"].append(len(timings))
             
     if len(result.shape) == 1:
         result = result.unsqueeze(0)
@@ -706,7 +715,11 @@ if args.compile:
         aiu_warmup_time = time.time() - aiu_warmup_time
         dprint(f"AIU warmup complete, took {aiu_warmup_time:.3f}s")
         result_json["aiu_warmup_s"] = aiu_warmup_time
-
+else:
+    result_json["pt_compile_s"] = None
+    result_json["update_lazyhandle_s"] = None
+    result_json["aiu_warmup_s"] = None
+    
 dprint(f"generating output")
 
 for sample, cache in itertools.product(do_sample, use_cache):
@@ -715,49 +728,24 @@ for sample, cache in itertools.product(do_sample, use_cache):
         infer(cache, sample, False, _)
 
 benchmark_duration = time.perf_counter() - benchmark_start_time
- 
-# dprint(json.dumps(output_json, indent=2))
-# completed=completed,
-# total_input=total_input,
-# total_output=sum(actual_output_lens),
-# request_throughput=completed / dur_s,
-# request_goodput=good_completed / dur_s,
-# output_throughput=sum(actual_output_lens) / dur_s,
-# total_token_throughput=(total_input + sum(actual_output_lens)) / dur_s,
-# mean_tpot_ms=np.mean(tpots or 0) * 1000,
-# std_tpot_ms=np.std(tpots or 0) * 1000,
-# median_tpot_ms=np.median(tpots or 0) * 1000,
-# percentiles_tpot_ms=[(p, np.percentile(tpots or 0, p) * 1000)
-#                         for p in selected_percentiles],
-# mean_itl_ms=np.mean(itls or 0) * 1000,
-# std_itl_ms=np.std(itls or 0) * 1000,
-# median_itl_ms=np.median(itls or 0) * 1000,
-# percentiles_itl_ms=[(p, np.percentile(itls or 0, p) * 1000)
-#                     for p in selected_percentiles],
-# mean_e2el_ms=np.mean(e2els or 0) * 1000,
-# std_e2el_ms=np.std(e2els or 0) * 1000,
-# median_e2el_ms=np.median(e2els or 0) * 1000,
-# percentiles_e2el_ms=[(p, np.percentile(e2els or 0, p) * 1000)
-#                         for p in selected_percentiles],
 
 selected_percentiles = [25,50,75,99]
         
 result = {
         "duration": benchmark_duration,
         "completed": len(output_json["responses_len"]),
-        # "total_input_tokens": metrics.total_input,
-        # "total_output_tokens": metrics.total_output,
-        # "request_throughput": metrics.request_throughput,
-        # "request_goodput:":
-        # metrics.request_goodput if goodput_config_dict else None,
-        # "output_throughput": metrics.output_throughput,
-        # "total_token_throughput": metrics.total_token_throughput,
+        "total_input_tokens": sum(output_json["prompts_len"]),
+        "total_output_tokens": sum(output_json["responses_len"]),
+        "request_throughput": len(output_json["responses_len"]) / benchmark_duration,
+        "request_goodput:": None,
+        "output_throughput": sum(output_json["responses_len"]) / benchmark_duration,
+        "total_token_throughput": (sum(output_json["prompts_len"])+sum(output_json["responses_len"]))/ benchmark_duration,
         "input_lens": output_json["prompts_len"],
         "output_lens": output_json["responses_len"],
         "ttfts": output_json["ttft_ms"],
         "itls": output_json["tpot_ms"],
         "generated_texts": output_json["responses"],
-        # "errors": [output.error for output in outputs],
+        "errors": [],
         "mean_ttft_ms": np.mean(output_json["ttft_ms"] or 0),  # ttfts is empty if streaming is not supported by backend
         "std_ttft_ms": np.std(output_json["ttft_ms"] or 0),
         "median_ttft_ms": np.median(output_json["ttft_ms"] or 0) ,
@@ -787,7 +775,7 @@ for p in selected_percentiles:
 # # Setup
 current_dt = datetime.now().strftime("%Y%m%d-%H%M%S")
 result_json["date"] = current_dt
-result_json["backend"] = "fms"
+result_json["backend"] = os.getenv("COMPONENT_NAME", "fms")
 result_json["model_id"] = output_json["model_path"].split("/")[-1] if output_json["model_path"] else output_json["variant"].split("/")[-1] 
 result_json["tokenizer_id"] = output_json["tokenizer"]
 result_json["best_of"] = None
