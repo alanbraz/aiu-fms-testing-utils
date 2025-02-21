@@ -252,8 +252,8 @@ result_json["num_aius"] = os.getenv("NUM_AIUS", None)
 
 output_json = vars(args)
 output_json["e2e_s"] = []
-output_json["ttft_ms"] = []
-# output_json["itl"] = []
+output_json["ttft_s"] = []
+output_json["itls_s"] = []
 output_json["tpot_ms"] = []
 output_json["prompts_raw"] = []
 output_json["prompts_raw_len"] = []
@@ -261,7 +261,11 @@ output_json["prompts"] = []
 output_json["prompts_len"] = []
 output_json["responses"] = []
 output_json["responses_len"] = []
-
+output_json["warmup_e2e_s"] = []
+output_json["warmup_ttft_s"] = []
+output_json["warmup_itls_s"] = []
+output_json["warmup_tpot_ms"] = []
+output_json["warmup_responses_len"] = []
 
 is_aiu_backend = "aiu" in args.device_type
 
@@ -536,7 +540,6 @@ else:
     prompts = prompts * ((args.batch_size // 4) + 1)
     prompts = prompts[: args.batch_size]
 
-print(type(prompts))
 for prompt in prompts:
     output_json["prompts_raw"].append(tokenizer.convert_tokens_to_string(
         tokenizer.convert_ids_to_tokens(prompt)
@@ -559,7 +562,6 @@ if args.fixed_prompt_length != 0 and args.fixed_prompt_length < max_len:
     )
     exit(1)
 prompts = truncate_prompts_to_max_length(prompts, max_len, max_allowed_length)
-print(type(prompts))
 
 for prompt in prompts:
     output_json["prompts"].append(tokenizer.convert_tokens_to_string(
@@ -615,15 +617,12 @@ def infer(use_cache, do_sample, warmup, iteration=0):
         # without ntk scaling, extending the seq length too far gives bogus results.
         max_seq_len = model.config.max_expected_seq_len
 
-    print(len(prompts))
     first = (iteration * args.batch_size)
-    print(iteration, first, args.batch_size)
     if has_padding:
         ids, extra_generation_kwargs = pad_input_ids(prompts[first:first+args.batch_size], min_pad_length=padding_length)
     else:
         ids = prompts
         extra_generation_kwargs = None
-    print(len(ids))
     
     # Add only_last_token optimization
     # global extra_generation_kwargs
@@ -652,7 +651,6 @@ def infer(use_cache, do_sample, warmup, iteration=0):
         eos_token_id=eos_token_id,
         extra_kwargs=extra_generation_kwargs,
     )
-    print(result)
     
     if args.timing != "":
         result, timings = result
@@ -667,11 +665,13 @@ def infer(use_cache, do_sample, warmup, iteration=0):
             dprint(f"TPOT: {(sum(timings[1:])*1000)/len(timings[1:]):.3f} ms")
             if not warmup:
                 output_json["e2e_s"].append(total)
-                output_json["ttft_ms"].append(timings[0]*1000)
+                output_json["ttft_s"].append(timings[0])
+                output_json["itls_s"].append(timings[1:])
                 output_json["tpot_ms"].append((sum(timings[1:])*1000)/len(timings[1:]))
             else:
                 output_json["warmup_e2e_s"].append(total)
-                output_json["warmup_ttft_ms"].append(timings[0]*1000)
+                output_json["warmup_ttft_s"].append(timings[0])
+                output_json["warmup_itls_s"].append(timings[1:])
                 output_json["warmup_tpot_ms"].append((sum(timings[1:])*1000)/len(timings[1:]))
         if not warmup:
             output_json["responses_len"].append(len(timings))
@@ -724,7 +724,6 @@ dprint(f"generating output")
 
 for sample, cache in itertools.product(do_sample, use_cache):
     for _ in range(args.iters):
-        print("==============" + str(_))
         infer(cache, sample, False, _)
 
 benchmark_duration = time.perf_counter() - benchmark_start_time
@@ -742,17 +741,17 @@ result = {
         "total_token_throughput": (sum(output_json["prompts_len"])+sum(output_json["responses_len"]))/ benchmark_duration,
         "input_lens": output_json["prompts_len"],
         "output_lens": output_json["responses_len"],
-        "ttfts": output_json["ttft_ms"],
-        "itls": output_json["tpot_ms"],
+        "ttfts": output_json["ttft_s"],
+        "itls": output_json["itls_s"],
         "generated_texts": output_json["responses"],
         "errors": [],
-        "mean_ttft_ms": np.mean(output_json["ttft_ms"] or 0),  # ttfts is empty if streaming is not supported by backend
-        "std_ttft_ms": np.std(output_json["ttft_ms"] or 0),
-        "median_ttft_ms": np.median(output_json["ttft_ms"] or 0) ,
+        "mean_ttft_ms": np.mean(output_json["ttft_s"] or 0)*1000,  # ttfts is empty if streaming is not supported by backend
+        "std_ttft_ms": np.std(output_json["ttft_s"] or 0)*1000,
+        "median_ttft_ms": np.median(output_json["ttft_s"] or 0)*1000 ,
     }
 
 for p in selected_percentiles:
-    result[f"p{p}_ttft_ms"] = np.percentile(output_json["ttft_ms"] or 0, p)
+    result[f"p{p}_ttft_ms"] = np.percentile(output_json["ttft_s"] or 0, p) *1000
     
 result["mean_tpot_ms"] = np.mean(output_json["tpot_ms"] or 0)  # ttfts is empty if streaming is not supported by backend
 result["std_tpot_ms"] = np.std(output_json["tpot_ms"] or 0)
@@ -776,8 +775,8 @@ for p in selected_percentiles:
 current_dt = datetime.now().strftime("%Y%m%d-%H%M%S")
 result_json["date"] = current_dt
 result_json["backend"] = os.getenv("COMPONENT_NAME", "fms")
-result_json["model_id"] = output_json["model_path"].split("/")[-1] if output_json["model_path"] else output_json["variant"].split("/")[-1] 
-result_json["tokenizer_id"] = output_json["tokenizer"]
+result_json["model_id"] = output_json["model_path"].rstrip("/").split("/")[-1] if output_json["model_path"] else output_json["variant"].rstrip("/").split("/")[-1] 
+result_json["tokenizer_id"] = output_json["tokenizer"].rstrip("/")
 result_json["best_of"] = None
 result_json["num_prompts"] = len(output_json["prompts"])
 result_json["request_rate"] = result["completed"] / result["duration"]
