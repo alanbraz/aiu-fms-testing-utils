@@ -266,6 +266,7 @@ output_json["warmup_e2e_s"] = []
 output_json["warmup_ttft_s"] = []
 output_json["warmup_itls_s"] = []
 output_json["warmup_tpot_ms"] = []
+output_json["warmup_itl_ms"] = []
 output_json["warmup_responses_len"] = []
 
 is_aiu_backend = "aiu" in args.device_type
@@ -792,6 +793,18 @@ result_json = {**result_json, **result}
 # Compute throughput using: Throughput=Batch Size/Inter-Token Latency (ITL)T
 result_json["throughput"] = args.batch_size / result["mean_itl_ms"]
 
+more = {
+    "power_idle_min": None,
+    "power_idle_avg": None,
+    "power_idle_max": None,
+    "power_busy_min": None,
+    "power_busy_avg": None,
+    "power_busy_max": None,
+    "devices-info": [],
+    "cluster": "ais5"
+}
+
+result_json = {**result_json, **more}
 
 if args.json_output_file != "":
     with open(args.json_output_file, "w", encoding="utf-8") as file:
