@@ -255,6 +255,7 @@ output_json["e2e_s"] = []
 output_json["ttft_s"] = []
 output_json["itls_s"] = []
 output_json["tpot_ms"] = []
+output_json["itl_ms"] = []
 output_json["prompts_raw"] = []
 output_json["prompts_raw_len"] = []
 output_json["prompts"] = []
@@ -668,11 +669,13 @@ def infer(use_cache, do_sample, warmup, iteration=0):
                 output_json["ttft_s"].append(timings[0])
                 output_json["itls_s"].append(timings[1:])
                 output_json["tpot_ms"].append((sum(timings[1:])*1000)/len(timings[1:]))
+                output_json["itl_ms"].append((sum(timings[1:])*1000)/len(timings))
             else:
                 output_json["warmup_e2e_s"].append(total)
                 output_json["warmup_ttft_s"].append(timings[0])
                 output_json["warmup_itls_s"].append(timings[1:])
                 output_json["warmup_tpot_ms"].append((sum(timings[1:])*1000)/len(timings[1:]))
+                output_json["warmup_itl_ms"].append((sum(timings[1:])*1000)/len(timings[1:]))
         if not warmup:
             output_json["responses_len"].append(len(timings))
         else:
@@ -759,11 +762,11 @@ result["median_tpot_ms"] = np.median(output_json["tpot_ms"] or 0)
 for p in selected_percentiles:
     result[f"p{p}_tpot_ms"] = np.percentile(output_json["tpot_ms"] or 0, p)
     
-result["mean_itl_ms"] = np.mean(output_json["tpot_ms"] or 0)  # ttfts is empty if streaming is not supported by backend
-result["std_itl_ms"] = np.std(output_json["tpot_ms"] or 0)
-result["median_itl_ms"] = np.median(output_json["tpot_ms"] or 0)
+result["mean_itl_ms"] = np.mean(output_json["itl_ms"] or 0)  # ttfts is empty if streaming is not supported by backend
+result["std_itl_ms"] = np.std(output_json["itl_ms"] or 0)
+result["median_itl_ms"] = np.median(output_json["itl_ms"] or 0)
 for p in selected_percentiles:
-    result[f"p{p}_itl_ms"] = np.percentile(output_json["tpot_ms"] or 0, p)
+    result[f"p{p}_itl_ms"] = np.percentile(output_json["itl_ms"] or 0, p)
 
 result["mean_e2el_ms"] = np.mean(output_json["e2e_s"] or 0)*1000 # ttfts is empty if streaming is not supported by backend
 result["std_e2el_ms"] = np.std(output_json["e2e_s"] or 0)*1000
@@ -785,6 +788,10 @@ result_json["max_concurrency"] = None
 
 # # Merge with benchmark result
 result_json = {**result_json, **result}
+
+# Compute throughput using: Throughput=Batch Size/Inter-Token Latency (ITL)T
+result_json["throughput"] = args.batch_size / result["mean_itl_ms"]
+
 
 if args.json_output_file != "":
     with open(args.json_output_file, "w", encoding="utf-8") as file:
