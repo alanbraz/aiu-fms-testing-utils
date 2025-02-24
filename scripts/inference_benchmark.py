@@ -241,14 +241,16 @@ if default_dtype is not None:
 
 dprint(f"{args}")
 
-result_json: Dict[str, Any] = {}
+benchmark_json: Dict[str, Any] = {}
 
-result_json["device_type"] = args.device_type
-result_json["precision"] = args.default_dtype
-result_json["batch_size"] = args.batch_size
-result_json["max_prompt_length"] = args.max_prompt_length
-result_json["max_new_tokens"] = args.max_new_tokens
-result_json["num_aius"] = os.getenv("NUM_AIUS", None)
+benchmark_json["cluster"] = "ais5"
+benchmark_json["device_type"] = args.device_type
+benchmark_json["num_aius"] = os.getenv("NUM_AIUS", None)
+benchmark_json["devices-info"] = []
+benchmark_json["precision"] = args.default_dtype
+benchmark_json["batch_size"] = args.batch_size
+benchmark_json["max_prompt_length"] = args.max_prompt_length
+benchmark_json["max_new_tokens"] = args.max_new_tokens
 
 output_json = vars(args)
 output_json["e2e_s"] = []
@@ -435,7 +437,7 @@ torch.set_grad_enabled(False)
 loading_model_time = time.time() - loading_model_time
 dprint(f"loading complete, took {loading_model_time:.3f}s")
 
-result_json["model_load_s"] = loading_model_time
+benchmark_json["model_load_s"] = loading_model_time
 
 if args.compile:
     dprint("compiling model")
@@ -446,7 +448,6 @@ if args.compile:
         model.compile(mode=args.compile_mode, backend=args.compile_backend)
 
 add_special_tokens = tokenizer.bos_token_id != tokenizer.eos_token_id
-
 
 def ids_for_prompt(prompt):
     tokens = tokenizer.tokenize(prompt)
@@ -601,7 +602,6 @@ def print_result(result, result_idx: int):
             with file_path.open("w", encoding="utf-8") as file:
                 file.write(output_str + "\n")
     dprint(output_str)
-    print()
     
     output_json["responses"].append(output_str)
 
@@ -670,15 +670,15 @@ def infer(use_cache, do_sample, warmup, iteration=0):
                 output_json["ttft_s"].append(timings[0])
                 output_json["itls_s"].append(timings[1:])
                 output_json["tpot_ms"].append((sum(timings[1:])*1000)/len(timings[1:]))
-                output_json["itl_ms"].append((sum(timings[1:])*1000)/len(timings))
+                output_json["itl_ms"].append((sum(timings[1:])*1000)/len(timings[1:]))
             else:
                 output_json["warmup_e2e_s"].append(total)
                 output_json["warmup_ttft_s"].append(timings[0])
                 output_json["warmup_itls_s"].append(timings[1:])
                 output_json["warmup_tpot_ms"].append((sum(timings[1:])*1000)/len(timings[1:]))
                 output_json["warmup_itl_ms"].append((sum(timings[1:])*1000)/len(timings[1:]))
-        if not warmup:
-            output_json["responses_len"].append(len(timings))
+        # if not warmup:
+        #     output_json["responses_len"].append(len(timings))
         else:
             output_json["warmup_responses_len"].append(len(timings))
             
@@ -688,7 +688,7 @@ def infer(use_cache, do_sample, warmup, iteration=0):
     if not warmup:
         for i in range(result.shape[0]):
             print_result(result[i], i)
-
+            output_json["responses_len"].append(len(tokenizer.convert_ids_to_tokens(result[i]))-len(ids[i].tolist()))
 
 do_sample = [False]
 use_cache = [
@@ -702,7 +702,7 @@ if args.compile:
         infer(cache, sample, True)
     pt_compile_model_time = time.time() - pt_compile_model_time
     dprint(f"PT compile complete, took {pt_compile_model_time:.3f}s")
-    result_json["pt_compile_s"] = pt_compile_model_time
+    benchmark_json["pt_compile_s"] = pt_compile_model_time
 
     if is_aiu_backend:
         dprint("executing update_lazyhandle and compiling for AIU")
@@ -710,7 +710,7 @@ if args.compile:
         torch_sendnn.update_lazyhandle()
         update_lh_time = time.time() - update_lh_time
         dprint(f"update_lazyhandle complete, took {update_lh_time:.3f}s")
-        result_json["update_lazyhandle_s"] = update_lh_time
+        benchmark_json["update_lazyhandle_s"] = update_lh_time
 
     if args.device_type == "aiu":  # only run warmup for AIU, no need for senulator
         aiu_warmup_time = time.time()
@@ -718,19 +718,24 @@ if args.compile:
             infer(cache, sample, True)
         aiu_warmup_time = time.time() - aiu_warmup_time
         dprint(f"AIU warmup complete, took {aiu_warmup_time:.3f}s")
-        result_json["aiu_warmup_s"] = aiu_warmup_time
+        benchmark_json["aiu_warmup_s"] = aiu_warmup_time
 else:
-    result_json["pt_compile_s"] = None
-    result_json["update_lazyhandle_s"] = None
-    result_json["aiu_warmup_s"] = None
+    benchmark_json["pt_compile_s"] = None
+    benchmark_json["update_lazyhandle_s"] = None
+    benchmark_json["aiu_warmup_s"] = None
     
 dprint(f"generating output")
+
+inference_start_time = time.perf_counter()
 
 for sample, cache in itertools.product(do_sample, use_cache):
     for _ in range(args.iters):
         infer(cache, sample, False, _)
 
+inference_duration = time.perf_counter() - inference_start_time
+
 benchmark_duration = time.perf_counter() - benchmark_start_time
+
 
 selected_percentiles = [25,50,75,99]
         
@@ -739,10 +744,10 @@ result = {
         "completed": len(output_json["responses_len"]),
         "total_input_tokens": sum(output_json["prompts_len"]),
         "total_output_tokens": sum(output_json["responses_len"]),
-        "request_throughput": len(output_json["responses_len"]) / benchmark_duration,
+        "request_throughput": len(output_json["responses_len"]) / inference_duration,
         "request_goodput:": None,
-        "output_throughput": sum(output_json["responses_len"]) / benchmark_duration,
-        "total_token_throughput": (sum(output_json["prompts_len"])+sum(output_json["responses_len"]))/ benchmark_duration,
+        "output_throughput": sum(output_json["responses_len"]) / inference_duration,
+        "total_token_throughput": (sum(output_json["prompts_len"])+sum(output_json["responses_len"]))/ inference_duration,
         "input_lens": output_json["prompts_len"],
         "output_lens": output_json["responses_len"],
         "ttfts": output_json["ttft_s"],
@@ -777,35 +782,70 @@ for p in selected_percentiles:
 
 # # Setup
 current_dt = datetime.now().strftime("%Y%m%d-%H%M%S")
-result_json["date"] = current_dt
-result_json["backend"] = os.getenv("COMPONENT_NAME", "fms")
-result_json["model_id"] = output_json["model_path"].rstrip("/").split("/")[-1] if output_json["model_path"] else output_json["variant"].rstrip("/").split("/")[-1] 
-result_json["tokenizer_id"] = output_json["tokenizer"].rstrip("/")
-result_json["best_of"] = None
-result_json["num_prompts"] = len(output_json["prompts"])
-result_json["request_rate"] = result["completed"] / result["duration"]
-result_json["burstiness"] = None
-result_json["max_concurrency"] = None
+vllm_json = {}
+vllm_json["date"] = current_dt
+vllm_json["backend"] = os.getenv("COMPONENT_NAME", "fms")
+vllm_json["model_id"] = output_json["model_path"].rstrip("/").split("/")[-1] if output_json["model_path"] else output_json["variant"].rstrip("/").split("/")[-1] 
+vllm_json["tokenizer_id"] = output_json["tokenizer"].rstrip("/")
+vllm_json["best_of"] = None
+vllm_json["num_prompts"] = len(output_json["prompts"])
+vllm_json["request_rate"] = result["completed"] / result["duration"] #review
+vllm_json["burstiness"] = None
+vllm_json["max_concurrency"] = None
 
 # # Merge with benchmark result
-result_json = {**result_json, **result}
+result_json = {**vllm_json, **result}
 
 # Compute throughput using: Throughput=Batch Size/Inter-Token Latency (ITL)T
-result_json["throughput"] = args.batch_size / result["mean_itl_ms"]
+benchmark_json["batch_output_token_throughput"] = args.batch_size / result["mean_itl_ms"]
 
-more = {
-    "power_idle_min": None,
-    "power_idle_avg": None,
-    "power_idle_max": None,
-    "power_busy_min": None,
-    "power_busy_avg": None,
-    "power_busy_max": None,
-    "devices-info": [],
-    "cluster": "ais5"
-}
+benchmark_json["inference_duration_s"] = inference_duration
 
-result_json = {**result_json, **more}
+columns = ["pwr", "gtemp", "rdmem", "wrmem", "rxpci", "txpci",  "rdrdma", "wrrdma" ]
+metrics = [ "min", "mean", "std", "median", "max" ]
+
+power_json = { }
+for c in columns:
+    for state in [ "idle", "busy" ]:
+        for m in metrics:
+            power_json[f"{c}_{state}_{m}"] = None
+
+benchmark_json["prompts"] = output_json["prompts"]
 
 if args.json_output_file != "":
+    
+    try:
+        import pandas as pd
+        # Replace 'yourfile.txt' with the path to your .txt file
+        log_file = args.json_output_file.replace(".json", "_power.log")
+
+        # Read the text file into a DataFrame, specifying the delimiter as '\t' (tab)
+        df = pd.read_csv(log_file, sep='\s+', header=0)
+        df = df.drop(index=0)
+        mapping_dict = {'-': None}
+        df = df.replace(mapping_dict)
+
+        for c in df.columns[2:].to_list():
+            df[c] = df[c].astype(float)
+            
+        import numpy as np
+        
+        for c in columns:
+            power_json[f"{c}_idle_min"] = np.min(df[(df["busy"]==0)][c])
+            power_json[f"{c}_idle_mean"] = np.mean(df[(df["busy"]==0)][c])
+            power_json[f"{c}_idle_std"] = np.std(df[(df["busy"]==0)][c])
+            power_json[f"{c}_idle_median"] = np.median(df[(df["busy"]==0)][c])
+            power_json[f"{c}_idle_max"] = np.max(df[(df["busy"]==0)][c])
+            power_json[f"{c}_busy_min"] = np.min(df[(df["busy"]>1)][c])
+            power_json[f"{c}_busy_mean"] = np.mean(df[(df["busy"]>1)][c])
+            power_json[f"{c}_busy_std"] = np.std(df[(df["busy"]>1)][c])
+            power_json[f"{c}_busy_median"] = np.median(df[(df["busy"]>1)][c])
+            power_json[f"{c}_busy_max"] = np.max(df[(df["busy"]>1)][c])
+    except:
+        print(f"Unable to parse power file {log_file}")
+        pass
+
+    result_json = {**result_json, **benchmark_json, **power_json}
+
     with open(args.json_output_file, "w", encoding="utf-8") as file:
         json.dump(result_json, file, indent=2)
