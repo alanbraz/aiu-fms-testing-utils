@@ -246,7 +246,13 @@ benchmark_json: Dict[str, Any] = {}
 benchmark_json["cluster"] = "ais5"
 benchmark_json["device_type"] = args.device_type
 benchmark_json["num_aius"] = os.getenv("NUM_AIUS", None)
-benchmark_json["devices-info"] = []
+try:
+    import subprocess
+    bash_command = "/opt/sentient/bin/aiu-query-devices --skip-topo | tail -n +2"
+    result = subprocess.check_output(bash_command, shell=True, text=True)
+    benchmark_json["devices-info"] = result.split("\n")
+except:
+    benchmark_json["devices-info"] = []
 benchmark_json["precision"] = args.default_dtype
 benchmark_json["batch_size"] = args.batch_size
 benchmark_json["max_prompt_length"] = args.max_prompt_length
