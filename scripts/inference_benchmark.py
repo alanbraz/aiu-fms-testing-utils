@@ -250,7 +250,7 @@ try:
     import subprocess
     bash_command = "/opt/sentient/bin/aiu-query-devices --skip-topo | tail -n +2"
     result = subprocess.check_output(bash_command, shell=True, text=True)
-    benchmark_json["devices-info"] = result.split("\n")
+    benchmark_json["devices-info"] = result.split("\n")[-1]
 except:
     benchmark_json["devices-info"] = []
 benchmark_json["precision"] = args.default_dtype
