@@ -247,10 +247,8 @@ benchmark_json["cluster"] = "ais5"
 benchmark_json["device_type"] = args.device_type
 benchmark_json["num_aius"] = os.getenv("NUM_AIUS", None)
 try:
-    import subprocess
-    bash_command = "/opt/sentient/bin/aiu-query-devices --skip-topo | tail -n +2"
-    result = subprocess.check_output(bash_command, shell=True, text=True)
-    benchmark_json["devices-info"] = result.split("\n")[-1]
+    all_lines = [line.strip("\n") for line in open(args.json_output_file.replace(".json", "_devices.info"), "r")]
+    benchmark_json["devices-info"] =  all_lines[1:all_lines.index('')]
 except:
     benchmark_json["devices-info"] = []
 benchmark_json["precision"] = args.default_dtype
