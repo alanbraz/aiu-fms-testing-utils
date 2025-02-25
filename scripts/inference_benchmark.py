@@ -268,12 +268,6 @@ output_json["prompts"] = []
 output_json["prompts_len"] = []
 output_json["responses"] = []
 output_json["responses_len"] = []
-output_json["warmup_e2e_s"] = []
-output_json["warmup_ttft_s"] = []
-output_json["warmup_itls_s"] = []
-output_json["warmup_tpot_ms"] = []
-output_json["warmup_itl_ms"] = []
-output_json["warmup_responses_len"] = []
 
 is_aiu_backend = "aiu" in args.device_type
 
@@ -665,26 +659,17 @@ def infer(use_cache, do_sample, warmup, iteration=0):
             output_json["e2e_s"].append(timings[0])
         elif args.timing == "per-token":
             total = sum(timings)
-            dprint(f"Per-token timing information: {', '.join([f'{t*1000:.3f}' for t in timings])} ms")
-            dprint(f"Total timing information: {total:.3f} s to generate {len(timings)} tokens")
-            dprint(f"TTFT: {timings[0]*1000:.3f} ms or {timings[0]:.3f} s")
-            dprint(f"TPOT: {(sum(timings[1:])*1000)/len(timings[1:]):.3f} ms")
+            warmup = "WARMUP!!! " if warmup else ""
+            dprint(f"{warmup}Per-token timing information: {', '.join([f'{t*1000:.3f}' for t in timings])} ms")
+            dprint(f"{warmup}Total timing information: {total:.3f} s to generate {len(timings)} tokens")
+            dprint(f"{warmup}TTFT: {timings[0]*1000:.3f} ms or {timings[0]:.3f} s")
+            dprint(f"{warmup}TPOT: {(sum(timings[1:])*1000)/len(timings[1:]):.3f} ms")
             if not warmup:
                 output_json["e2e_s"].append(total)
-                output_json["ttft_s"].append(timings[0])
-                output_json["itls_s"].append(timings[1:])
-                output_json["tpot_ms"].append((sum(timings[1:])*1000)/len(timings[1:]))
-                output_json["itl_ms"].append((sum(timings[1:])*1000)/len(timings[1:]))
-            else:
-                output_json["warmup_e2e_s"].append(total)
-                output_json["warmup_ttft_s"].append(timings[0])
-                output_json["warmup_itls_s"].append(timings[1:])
-                output_json["warmup_tpot_ms"].append((sum(timings[1:])*1000)/len(timings[1:]))
-                output_json["warmup_itl_ms"].append((sum(timings[1:])*1000)/len(timings[1:]))
-        # if not warmup:
-        #     output_json["responses_len"].append(len(timings))
-        else:
-            output_json["warmup_responses_len"].append(len(timings))
+                output_json["ttft_s"].append(timings[0] if len(timings)>0 else 0)
+                output_json["itls_s"].append(timings[1:] if len(timings)>1 else 0)
+                output_json["tpot_ms"].append((sum(timings[1:])*1000)/len(timings[1:]) if len(timings)>1 else 0)
+                output_json["itl_ms"].append((sum(timings[1:])*1000)/len(timings[1:]) if len(timings)>1 else 0)
             
     if len(result.shape) == 1:
         result = result.unsqueeze(0)
