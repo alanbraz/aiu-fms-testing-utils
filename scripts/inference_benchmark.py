@@ -245,7 +245,7 @@ benchmark_json: Dict[str, Any] = {}
 
 benchmark_json["cluster"] = "ais5"
 benchmark_json["device_type"] = args.device_type
-benchmark_json["num_aius"] = os.getenv("NUM_AIUS", None)
+benchmark_json["num_aius"] = int(os.getenv("NUM_AIUS", "0"))
 try:
     all_lines = [line.strip("\n") for line in open(args.json_output_file.replace(".json", "_devices.info"), "r")]
     benchmark_json["devices-info"] =  all_lines[1:all_lines.index('')]
