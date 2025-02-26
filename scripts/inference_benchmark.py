@@ -662,8 +662,8 @@ def infer(use_cache, do_sample, warmup, iteration=0):
             warmup = "WARMUP!!! " if warmup else ""
             dprint(f"{warmup}Per-token timing information: {', '.join([f'{t*1000:.3f}' for t in timings])} ms")
             dprint(f"{warmup}Total timing information: {total:.3f} s to generate {len(timings)} tokens")
-            dprint(f"{warmup}TTFT: {timings[0]*1000:.3f} ms or {timings[0]:.3f} s")
-            dprint(f"{warmup}TPOT: {(sum(timings[1:])*1000)/len(timings[1:]):.3f} ms")
+            dprint(f"{warmup}TTFT: {timings[0]*1000 if len(timings)>0 else 0:.3f} ms or {timings[0] if len(timings)>0 else 0:.3f} s")
+            dprint(f"{warmup}TPOT: {(sum(timings[1:])*1000)/len(timings[1:]) if len(timings)>1 else 0:.3f} ms")
             if not warmup:
                 output_json["e2e_s"].append(total)
                 output_json["ttft_s"].append(timings[0] if len(timings)>0 else 0)
