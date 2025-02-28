@@ -248,9 +248,9 @@ benchmark_json["device_type"] = args.device_type
 benchmark_json["num_aius"] = int(os.getenv("NUM_AIUS", "0"))
 try:
     all_lines = [line.strip("\n") for line in open(args.json_output_file.replace(".json", "_devices.info"), "r")]
-    benchmark_json["devices-info"] =  all_lines[1:all_lines.index('')]
+    benchmark_json["devices_info"] =  all_lines[1:all_lines.index('')]
 except:
-    benchmark_json["devices-info"] = []
+    benchmark_json["devices_info"] = []
 benchmark_json["precision"] = args.default_dtype
 benchmark_json["batch_size"] = args.batch_size
 benchmark_json["max_prompt_length"] = args.max_prompt_length
@@ -734,7 +734,7 @@ result = {
         "total_input_tokens": sum(output_json["prompts_len"]),
         "total_output_tokens": sum(output_json["responses_len"]),
         "request_throughput": len(output_json["responses_len"]) / inference_duration,
-        "request_goodput:": None,
+        "request_goodput": None,
         "output_throughput": sum(output_json["responses_len"]) / inference_duration,
         "total_token_throughput": (sum(output_json["prompts_len"])+sum(output_json["responses_len"]))/ inference_duration,
         "input_lens": output_json["prompts_len"],
