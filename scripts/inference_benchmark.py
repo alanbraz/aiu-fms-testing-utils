@@ -692,6 +692,7 @@ if args.compile:
     pt_compile_model_time = time.time() - pt_compile_model_time
     dprint(f"PT compile complete, took {pt_compile_model_time:.3f}s")
     benchmark_json["pt_compile_s"] = pt_compile_model_time
+    benchmark_json["total_warmup_m"] = benchmark_json["pt_compile_s"]
 
     if is_aiu_backend:
         dprint("executing update_lazyhandle and compiling for AIU")
@@ -700,6 +701,7 @@ if args.compile:
         update_lh_time = time.time() - update_lh_time
         dprint(f"update_lazyhandle complete, took {update_lh_time:.3f}s")
         benchmark_json["update_lazyhandle_s"] = update_lh_time
+        benchmark_json["total_warmup_m"] += benchmark_json["update_lazyhandle_s"]
 
     if args.device_type == "aiu":  # only run warmup for AIU, no need for senulator
         aiu_warmup_time = time.time()
@@ -708,6 +710,8 @@ if args.compile:
         aiu_warmup_time = time.time() - aiu_warmup_time
         dprint(f"AIU warmup complete, took {aiu_warmup_time:.3f}s")
         benchmark_json["aiu_warmup_s"] = aiu_warmup_time
+        benchmark_json["total_warmup_m"] += benchmark_json["aiu_warmup_s"]
+
 else:
     benchmark_json["pt_compile_s"] = None
     benchmark_json["update_lazyhandle_s"] = None
