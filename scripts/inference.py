@@ -6,6 +6,8 @@ import random
 import sys
 import time
 from pathlib import Path
+from datetime import datetime
+
 
 from aiu_fms_testing_utils.utils import aiu_setup
 from aiu_fms_testing_utils.utils.aiu_setup import dprint, rank, local_rank, world_size
@@ -174,6 +176,13 @@ parser.add_argument(
     default="",
     help="path of folder to save outputs to, if empty don't save",
 )
+
+parser.add_argument(
+    "--json_output_file",
+    type=str,
+    default="",
+    help="path of file to save json outputs to, if empty don't save",
+)
 parser.add_argument(
     "--timing",
     type=str,
@@ -232,6 +241,19 @@ if default_dtype is not None:
     torch.set_default_dtype(default_dtype)
 
 dprint(f"{args}")
+
+output_json = vars(args)
+output_json["e2e_s"] = []
+output_json["ttft_s"] = []
+output_json["itls_s"] = []
+output_json["tpot_ms"] = []
+output_json["itl_ms"] = []
+output_json["prompts_raw"] = []
+output_json["prompts_raw_len"] = []
+output_json["prompts"] = []
+output_json["prompts_len"] = []
+output_json["responses"] = []
+output_json["responses_len"] = []
 
 is_aiu_backend = "aiu" in args.device_type
 
@@ -368,6 +390,8 @@ dprint(f"{fused_weights=}")
 dprint(f"data_type={default_dtype}")
 dprint("="*60 + "\n")
 
+total_start_time = time.perf_counter()
+
 model = get_model(
     args.architecture,
     args.variant,
@@ -397,6 +421,8 @@ torch.set_grad_enabled(False)
 loading_model_time = time.time() - loading_model_time
 dprint(f"loading complete, took {loading_model_time:.3f}s")
 
+output_json["model_load_s"] = loading_model_time
+
 if args.compile:
     dprint("compiling model")
     if is_aiu_backend:
@@ -406,7 +432,6 @@ if args.compile:
         model.compile(mode=args.compile_mode, backend=args.compile_backend)
 
 add_special_tokens = tokenizer.bos_token_id != tokenizer.eos_token_id
-
 
 def ids_for_prompt(prompt):
     tokens = tokenizer.tokenize(prompt)
@@ -462,7 +487,7 @@ if args.prompt_path != "":
 
     prompts = []
     for i, prompt_file_path in enumerate(prompt_file_paths):
-        if i == args.batch_size:
+        if i == args.batch_size * args.iters:
             break
         prompts.append(ids_for_prompt(prompt_file_path.read_text(encoding="utf-8")))
 
@@ -518,12 +543,12 @@ if args.fixed_prompt_length != 0 and args.fixed_prompt_length < max_len:
     )
     exit(1)
 prompts = truncate_prompts_to_max_length(prompts, max_len, max_allowed_length)
-if has_padding:
-    ids, extra_generation_kwargs = pad_input_ids(prompts, min_pad_length=padding_length)
-else:
-    ids = prompts
-    extra_generation_kwargs = None
 
+for prompt in prompts:
+    output_json["prompts"].append(tokenizer.convert_tokens_to_string(
+        tokenizer.convert_ids_to_tokens(prompt)
+    ))
+    output_json["prompts_len"].append(len(prompt))
 
 def print_result(result, result_idx: int):
     if local_rank != 0:
@@ -550,9 +575,10 @@ def print_result(result, result_idx: int):
                 file.write(output_str + "\n")
     dprint(output_str)
     print()
+    output_json["responses"].append(output_str)
 
 
-def infer(use_cache, do_sample, warmup):
+def infer(use_cache, do_sample, warmup, iteration=0):
     # With greedy generation (do_sample=False) we _should_ always get the same results.
     # There is currently a bug in start_pos for batched rotary embeddings that can lead
     # varying results for the same prompt.
@@ -565,8 +591,15 @@ def infer(use_cache, do_sample, warmup):
         # without ntk scaling, extending the seq length too far gives bogus results.
         max_seq_len = model.config.max_expected_seq_len
 
+    first = (iteration * args.batch_size)
+    if has_padding:
+        ids, extra_generation_kwargs = pad_input_ids(prompts[first:first+args.batch_size], min_pad_length=padding_length)
+    else:
+        ids = prompts
+        extra_generation_kwargs = None
+    
     # Add only_last_token optimization
-    global extra_generation_kwargs
+    #global extra_generation_kwargs
     if extra_generation_kwargs is None:
         extra_generation_kwargs = {}
     extra_generation_kwargs["only_last_token"] = True
@@ -579,7 +612,7 @@ def infer(use_cache, do_sample, warmup):
         eos_token_id = tokenizer.eos_token_id
     else:
         eos_token_id = None
-
+        
     result = generate(
         model,
         ids,
@@ -595,16 +628,28 @@ def infer(use_cache, do_sample, warmup):
         result, timings = result
         if args.timing == "e2e":
             dprint(f"E2E timing information: {timings[0]:.3f}s")
+            output_json["e2e_s"].append(timings[0])
         elif args.timing == "per-token":
-            timings = [f"{t*1000:.3f}" for t in timings]
-            dprint(f"Per-token timing information: {', '.join(timings)} ms")
+            total = sum(timings)
+            warmup = "WARMUP!!! " if warmup else ""
+            dprint(f"{warmup}Per-token timing information: {', '.join([f'{t*1000:.3f}' for t in timings])} ms")
+            dprint(f"{warmup}Total timing information: {total:.3f} s to generate {len(timings)} tokens")
+            dprint(f"{warmup}TTFT: {timings[0]*1000 if len(timings)>0 else 0:.3f} ms or {timings[0] if len(timings)>0 else 0:.3f} s")
+            dprint(f"{warmup}TPOT: {(sum(timings[1:])*1000)/len(timings[1:]) if len(timings)>1 else 0:.3f} ms")
+            if not warmup:
+                output_json["e2e_s"].append(total)
+                output_json["ttft_s"].append(timings[0] if len(timings)>0 else 0)
+                output_json["itls_s"].append(timings[1:] if len(timings)>1 else 0)
+                output_json["tpot_ms"].append((sum(timings[1:])*1000)/len(timings[1:]) if len(timings)>1 else 0)
+                output_json["itl_ms"].append((sum(timings[1:])*1000)/len(timings[1:]) if len(timings)>1 else 0)
+            
     if len(result.shape) == 1:
         result = result.unsqueeze(0)
 
     if not warmup:
         for i in range(result.shape[0]):
             print_result(result[i], i)
-
+            output_json["responses_len"].append(len(tokenizer.convert_ids_to_tokens(result[i]))-len(ids[i].tolist()))
 
 do_sample = [False]
 use_cache = [
@@ -618,6 +663,8 @@ if args.compile:
         infer(cache, sample, True)
     pt_compile_model_time = time.time() - pt_compile_model_time
     dprint(f"PT compile complete, took {pt_compile_model_time:.3f}s")
+    output_json["pt_compile_s"] = pt_compile_model_time
+    output_json["total_warmup_m"] = output_json["pt_compile_s"] / 60
 
     if is_aiu_backend:
         dprint("executing update_lazyhandle and compiling for AIU")
@@ -625,6 +672,8 @@ if args.compile:
         torch_sendnn.update_lazyhandle()
         update_lh_time = time.time() - update_lh_time
         dprint(f"update_lazyhandle complete, took {update_lh_time:.3f}s")
+        output_json["update_lazyhandle_s"] = update_lh_time
+        output_json["total_warmup_m"] += output_json["update_lazyhandle_s"] / 60
 
     if args.device_type == "aiu":  # only run warmup for AIU, no need for senulator
         aiu_warmup_time = time.time()
@@ -632,9 +681,97 @@ if args.compile:
             infer(cache, sample, True)
         aiu_warmup_time = time.time() - aiu_warmup_time
         dprint(f"AIU warmup complete, took {aiu_warmup_time:.3f}s")
+        output_json["aiu_warmup_s"] = aiu_warmup_time
+        output_json["total_warmup_m"] += output_json["aiu_warmup_s"] / 60
 
+else:
+    output_json["pt_compile_s"] = None
+    output_json["update_lazyhandle_s"] = None
+    output_json["aiu_warmup_s"] = None
+    output_json["total_warmup_m"] = None
+    
 dprint(f"generating output")
+
+inference_start_time = time.perf_counter()
 
 for sample, cache in itertools.product(do_sample, use_cache):
     for _ in range(args.iters):
-        infer(cache, sample, False)
+        infer(cache, sample, False, _)
+
+inference_duration = time.perf_counter() - inference_start_time
+
+total_duration = time.perf_counter() - total_start_time
+
+selected_percentiles = [25,50,75,99]
+        
+result = {
+        "duration": total_duration,
+        "completed": len(output_json["responses_len"]),
+        "total_input_tokens": sum(output_json["prompts_len"]),
+        "total_output_tokens": sum(output_json["responses_len"]),
+        "request_throughput": len(output_json["responses_len"]) / inference_duration,
+        "request_goodput": None,
+        "output_throughput": sum(output_json["responses_len"]) / inference_duration,
+        "total_token_throughput": (sum(output_json["prompts_len"])+sum(output_json["responses_len"]))/ inference_duration,
+        "input_lens": output_json["prompts_len"],
+        "output_lens": output_json["responses_len"],
+        "ttfts": output_json["ttft_s"],
+        "itls": output_json["itls_s"],
+        "generated_texts": output_json["responses"],
+        "errors": [],
+        "mean_ttft_ms": np.mean(output_json["ttft_s"] or 0)*1000,  # ttfts is empty if streaming is not supported by backend
+        "std_ttft_ms": np.std(output_json["ttft_s"] or 0)*1000,
+        "median_ttft_ms": np.median(output_json["ttft_s"] or 0)*1000 ,
+    }
+
+for p in selected_percentiles:
+    result[f"p{p}_ttft_ms"] = np.percentile(output_json["ttft_s"] or 0, p) *1000
+    
+result["mean_tpot_ms"] = np.mean(output_json["tpot_ms"] or 0)  # ttfts is empty if streaming is not supported by backend
+result["std_tpot_ms"] = np.std(output_json["tpot_ms"] or 0)
+result["median_tpot_ms"] = np.median(output_json["tpot_ms"] or 0)
+for p in selected_percentiles:
+    result[f"p{p}_tpot_ms"] = np.percentile(output_json["tpot_ms"] or 0, p)
+    
+result["mean_itl_ms"] = np.mean(output_json["itl_ms"] or 0)  # ttfts is empty if streaming is not supported by backend
+result["std_itl_ms"] = np.std(output_json["itl_ms"] or 0)
+result["median_itl_ms"] = np.median(output_json["itl_ms"] or 0)
+for p in selected_percentiles:
+    result[f"p{p}_itl_ms"] = np.percentile(output_json["itl_ms"] or 0, p)
+
+result["mean_e2el_ms"] = np.mean(output_json["e2e_s"] or 0)*1000 # ttfts is empty if streaming is not supported by backend
+result["std_e2el_ms"] = np.std(output_json["e2e_s"] or 0)*1000
+result["median_e2el_ms"] = np.median(output_json["e2e_s"] or 0)*1000
+for p in selected_percentiles:
+    result[f"p{p}_e2el_ms"] = np.percentile(output_json["e2e_s"] or 0, p)*1000
+
+# # Setup
+current_dt = datetime.now().strftime("%Y%m%d-%H%M%S")
+vllm_json = {}
+vllm_json["date"] = current_dt
+vllm_json["backend"] = os.getenv("COMPONENT_NAME", "fms")
+vllm_json["model_id"] = output_json["model_path"].rstrip("/").split("/")[-1] if output_json["model_path"] else output_json["variant"].rstrip("/").split("/")[-1] 
+vllm_json["tokenizer_id"] = output_json["tokenizer"].rstrip("/")
+vllm_json["best_of"] = None
+vllm_json["num_prompts"] = len(output_json["prompts"])
+vllm_json["request_rate"] = result["completed"] / result["duration"] #review
+vllm_json["burstiness"] = None
+vllm_json["max_concurrency"] = None
+
+# # Merge with benchmark result
+result_json = {**vllm_json, **result}
+
+# Compute throughput using: Throughput=Batch Size/Inter-Token Latency (ITL)T
+result_json["batch_output_token_throughput"] = args.batch_size / result["mean_itl_ms"]
+
+result_json["inference_duration_s"] = inference_duration
+
+result_json["prompts"] = output_json["prompts"]
+
+if args.json_output_file != "":
+    
+    
+    #result_json = {**result_json, **benchmark_json}
+
+    with open(args.json_output_file, "w", encoding="utf-8") as file:
+        json.dump(result_json, file, indent=2)
